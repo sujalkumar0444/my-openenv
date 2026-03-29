@@ -1,0 +1,9 @@
+spec_version: 1
+name: oncall_incident_response
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+version: 1.1.0
+description: On-call incident response environment for reliability workflows.
+

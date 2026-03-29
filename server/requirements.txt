@@ -1,0 +1,6 @@
+openenv-core[core]>=0.2.1
+fastapi>=0.135.2
+uvicorn>=0.42.0
+
+
+

@@ -1,0 +1,36 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-oncall-incident-response"
+version = "1.1.0"
+description = "On-call incident response environment for OpenEnv."
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core[core]>=0.2.1",
+    "openai>=2.30.0",
+    "requests>=2.33.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+# Server entry point - enables running via: uv run --project . server
+# or: python -m my_env.server.app
+server = "my_env.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["my_env", "my_env.server"]
+package-dir = { "my_env" = ".", "my_env.server" = "server" }
