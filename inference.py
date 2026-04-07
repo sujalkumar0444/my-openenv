@@ -18,7 +18,7 @@ from openenv.core.sync_client import SyncEnvClient
 
 from my_env import IncidentAction, IncidentEnv, IncidentObservation, IncidentState
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+API_BASE_URL = os.environ.get("API_BASE_URL")
 API_KEY = (
     os.environ.get("API_KEY")
 )
