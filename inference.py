@@ -10,7 +10,8 @@ MANDATORY
 
 import os
 import re
-from typing import Dict, List, Tuple
+import sys
+from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 from openenv.core.sync_client import SyncEnvClient
@@ -25,6 +26,7 @@ API_KEY = (
 )
 MODEL_NAME = os.environ.get("MODEL_NAME")
 ENV_URL = os.environ.get("ENV_URL", "http://127.0.0.1:8000")
+BENCHMARK = os.environ.get("BENCHMARK", "oncall_incident_response")
 
 MAX_STEPS = 12
 TEMPERATURE = 0.0
@@ -76,8 +78,44 @@ def _expected_action(task_id: str, step_index: int) -> str:
     return "status"
 
 
-def get_action(client: OpenAI, history: str, task_id: str, step_index: int) -> str:
+def _stderr_log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _sanitize_inline(text: str) -> str:
+    return text.replace("\n", " ").replace("\r", " ").strip()
+
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    done_val = str(done).lower()
+    error_val = "null" if not error else _sanitize_inline(error)
+    action_val = _sanitize_inline(action)
+    print(
+        f"[STEP] step={step} action={action_val} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    success_val = str(success).lower()
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    score_val = max(0.0, min(score, 1.0))
+    print(
+        f"[END] success={success_val} steps={steps} score={score_val:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+def get_action(
+    client: Optional[OpenAI], history: str, task_id: str, step_index: int
+) -> str:
     expected = _expected_action(task_id, step_index)
+    if client is None or not MODEL_NAME:
+        return expected
     prompt = (
         "You are an on-call reliability engineer.\n"
         f"Task: {task_id}.\n"
@@ -103,66 +141,83 @@ def get_action(client: OpenAI, history: str, task_id: str, step_index: int) -> s
             return candidate
         return expected
     except Exception as exc:
-        print(f"LLM call failed, using deterministic fallback: {exc}")
+        _stderr_log(f"LLM call failed, using deterministic fallback: {exc}")
         return expected
 
 
 IncidentSyncEnv = SyncEnvClient[IncidentAction, IncidentObservation, IncidentState]
 
 
-def run_task(client: OpenAI, env: IncidentSyncEnv, task_id: str) -> Tuple[float, str]:
-    print(f"\n--- Starting Task: {task_id} ---")
-    reset_result = env.reset(task_id=task_id)
-    history = reset_result.observation.stdout
+def run_task(client: Optional[OpenAI], task_id: str) -> Tuple[float, str]:
+    model_label = MODEL_NAME or "unknown"
+    log_start(task=task_id, env=BENCHMARK, model=model_label)
 
-    final_score = 0.0
-    final_reason = ""
+    rewards: List[float] = []
+    steps_taken = 0
+    last_status = ""
+    last_done = False
 
-    for step in range(MAX_STEPS):
-        command = get_action(client, history, task_id, step)
-        print(f"Agent executing: {command}")
+    try:
+        sync_env = IncidentEnv(base_url=ENV_URL).sync()
+        with sync_env as env:
+            reset_result = env.reset(task_id=task_id)
+            history = reset_result.observation.stdout
 
-        result = env.step(IncidentAction(command=command))
+            for step in range(1, MAX_STEPS + 1):
+                command = get_action(client, history, task_id, step - 1)
 
-        obs = result.observation
-        stdout = obs.stdout
-        stderr = obs.stderr
-        status = obs.status
-        print(f"Stdout: {stdout}\nStderr: {stderr}")
+                result = env.step(IncidentAction(command=command))
+                obs = result.observation
+                stdout = obs.stdout
+                stderr = obs.stderr
+                last_status = obs.status
+                last_done = bool(result.done)
 
-        history += f"\n> {command}\n"
-        if stdout:
-            history += f"{stdout}\n"
-        if stderr:
-            history += f"{stderr}\n"
+                history += f"\n> {command}\n"
+                if stdout:
+                    history += f"{stdout}\n"
+                if stderr:
+                    history += f"{stderr}\n"
 
-        reward = result.reward
-        final_score = float(reward) if reward is not None else 0.0
-        final_reason = status
+                reward = float(result.reward) if result.reward is not None else 0.0
+                rewards.append(reward)
+                steps_taken = step
 
-        if result.done:
-            print(f"Task Complete! Score: {final_score} - {final_reason}")
-            break
+                log_step(step=step, action=command, reward=reward, done=last_done, error=stderr)
 
-    return final_score, final_reason
+                if last_done:
+                    break
+    except Exception as exc:
+        _stderr_log(f"Environment run failed for task {task_id}: {exc}")
+    finally:
+        final_score = rewards[-1] if rewards else 0.0
+        final_score = max(0.0, min(final_score, 1.0))
+        success = final_score > 0.0 and last_done
+        log_end(success=success, steps=steps_taken, score=final_score, rewards=rewards)
+
+    return final_score, last_status
+
+
+def main() -> int:
+    if not API_KEY or not MODEL_NAME:
+        _stderr_log(
+            "Missing API credentials. Set HF_TOKEN or OPENAI_API_KEY (or API_KEY) and MODEL_NAME."
+        )
+        _stderr_log("Continuing with deterministic plan (no LLM calls).")
+        client = None
+    else:
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    scores: Dict[str, float] = {}
+    for task in TASK_PLANS.keys():
+        score, _reason = run_task(client, task)
+        scores[task] = score
+
+    avg = sum(scores.values()) / max(len(scores), 1)
+    avg = max(0.0, min(avg, 1.0))
+    _stderr_log(f"Average score (stderr): {avg:.2f}")
+    return 0
 
 
 if __name__ == "__main__":
-    if not API_KEY or not MODEL_NAME:
-        raise SystemExit(
-            "Missing API credentials. Set HF_TOKEN or OPENAI_API_KEY (or API_KEY) and MODEL_NAME."
-        )
-
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    scores: Dict[str, float] = {}
-    sync_env = IncidentEnv(base_url=ENV_URL).sync()
-    with sync_env as env:
-        for task in TASK_PLANS.keys():
-            score, reason = run_task(client, env, task)
-            scores[task] = score
-            print(f"Result: {task} => {score} ({reason})")
-
-    avg = sum(scores.values()) / max(len(scores), 1)
-    print("\n--- All Evaluation Finished ---")
-    print(f"Average score: {avg:.2f}")
+    raise SystemExit(main())
