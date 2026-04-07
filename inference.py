@@ -19,9 +19,7 @@ from openenv.core.sync_client import SyncEnvClient
 from my_env import IncidentAction, IncidentEnv, IncidentObservation, IncidentState
 
 API_BASE_URL = os.environ.get("API_BASE_URL")
-API_KEY = (
-    os.environ.get("API_KEY")
-)
+API_KEY = os.environ.get("API_KEY")
 MODEL_NAME = os.environ.get("MODEL_NAME")
 ENV_URL = os.environ.get("ENV_URL", "http://127.0.0.1:8000")
 BENCHMARK = os.environ.get("BENCHMARK", "oncall_incident_response")
@@ -197,14 +195,13 @@ def run_task(client: Optional[OpenAI], task_id: str) -> Tuple[float, str]:
 
 
 def main() -> int:
-    if not API_KEY or not MODEL_NAME:
+    if not API_BASE_URL or not API_KEY or not MODEL_NAME:
         _stderr_log(
-            "Missing API credentials. Set HF_TOKEN or OPENAI_API_KEY (or API_KEY) and MODEL_NAME."
+            "Missing API credentials. Set API_BASE_URL, API_KEY, and MODEL_NAME."
         )
-        _stderr_log("Continuing with deterministic plan (no LLM calls).")
-        client = None
-    else:
-        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+        return 1
+
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     scores: Dict[str, float] = {}
     for task in TASK_PLANS.keys():
