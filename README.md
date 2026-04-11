@@ -21,12 +21,30 @@ Production incidents require careful investigation, safe remediation, and discip
 - `stderr` (string): Standard error output.
 - `exit_code` (int): 0 for success, non-zero for failures.
 - `status` (string): Progress or grading status message.
+- `task_id` (string): Active task identifier.
+- `step_count` (int): Current step number.
+- `max_steps` (int): Maximum steps for the current task.
+- `task_spec` (dict): Task metadata (objective, difficulty, services, variant).
+- `service_status` (dict): Latest status per service.
+- `last_command` (string | null): Most recent command.
 - `milestones` (dict): Completed milestones for the active task.
 - `penalties` (dict): Penalty counters for invalid or repeated actions.
 
 ## Action Space
 - `command` (string): The single CLI command to run.
   - Supported commands: `status`, `logs <service>`, `restart <service>`, `edit_config <service> <key=value>`, `drain <service>`, `rollback <service>`, `help`, `noop`
+
+### Structured Actions (Optional)
+You can send structured fields instead of a raw command string:
+```json
+{
+   "action_type": "edit_config",
+   "service": "checkout-api",
+   "config_key": "DATABASE_HOST",
+   "config_value": "db-prod.internal"
+}
+```
+Supported `action_type` values: `status`, `logs`, `restart`, `edit_config`, `drain`, `rollback`, `help`, `noop`.
 
 ## Reward Function
 - Partial progress rewards for investigation and safe remediation steps.
@@ -43,6 +61,30 @@ Production incidents require careful investigation, safe remediation, and discip
 3. **rollback_deploy (Hard)**
    - *Objective:* Confirm memory leak, drain traffic from `search-api`, then roll back safely.
    - *Grading:* Partial rewards for investigation and draining, full score for safe rollback.
+
+Variants (optional via scenario config):
+- restart_pod: `disk_pressure`, `network_flap`
+- fix_config: `legacy_host`, `staging_host`
+- rollback_deploy: `gc_thrashing`, `cache_leak`
+
+## Scenario Configuration
+You can customize a run by passing `scenario_config` to `reset`:
+```json
+{
+  "task_id": "restart_pod",
+  "scenario_config": {
+    "variant": "disk_pressure",
+    "seed": 42,
+    "max_steps": 12,
+    "randomize": false
+  }
+}
+```
+Fields:
+- `variant`: Override the log variant for the task (`base` or a variant name).
+- `seed`: Seed for deterministic variant selection.
+- `max_steps`: Override maximum steps for the episode.
+- `randomize`: If true, selects a random variant when `variant` is not provided.
 
 ## Setup & Usage
 

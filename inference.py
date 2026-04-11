@@ -19,13 +19,14 @@ from openenv.core.sync_client import SyncEnvClient
 from my_env import IncidentAction, IncidentEnv, IncidentObservation, IncidentState
 
 API_BASE_URL = os.environ.get("API_BASE_URL")
-API_KEY = os.environ.get("API_KEY")
-MODEL_NAME = os.environ.get("MODEL_NAME")
+API_KEY = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY")
+MODEL_NAME = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
 ENV_URL = os.environ.get("ENV_URL", "http://127.0.0.1:8000")
 BENCHMARK = os.environ.get("BENCHMARK", "oncall_incident_response")
 
 MAX_STEPS = 12
 TEMPERATURE = 0.0
+SCORE_EPS = 0.01
 
 TASK_PLANS: Dict[str, List[str]] = {
     "restart_pod": [
@@ -82,6 +83,12 @@ def _sanitize_inline(text: str) -> str:
     return text.replace("\n", " ").replace("\r", " ").strip()
 
 
+def _clamp_score(score: float) -> float:
+    score = max(score, SCORE_EPS)
+    score = min(score, 1.0 - SCORE_EPS)
+    return score
+
+
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
@@ -99,7 +106,7 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     success_val = str(success).lower()
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    score_val = max(0.0, min(score, 1.0))
+    score_val = _clamp_score(score)
     print(
         f"[END] success={success_val} steps={steps} score={score_val:.2f} rewards={rewards_str}",
         flush=True,
@@ -186,18 +193,29 @@ def run_task(client: Optional[OpenAI], task_id: str) -> Tuple[float, str]:
     except Exception as exc:
         _stderr_log(f"Environment run failed for task {task_id}: {exc}")
     finally:
-        final_score = rewards[-1] if rewards else 0.0
-        final_score = max(0.0, min(final_score, 1.0))
-        success = final_score > 0.0 and last_done
-        log_end(success=success, steps=steps_taken, score=final_score, rewards=rewards)
+        raw_score = rewards[-1] if rewards else 0.0
+        raw_score = max(0.0, min(raw_score, 1.0))
+        success = raw_score > 0.0 and last_done
+        score = _clamp_score(raw_score)
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-    return final_score, last_status
+    return raw_score, last_status
 
 
 def main() -> int:
-    if not API_BASE_URL or not API_KEY or not MODEL_NAME:
+    if not API_BASE_URL:
         _stderr_log(
-            "Missing API credentials. Set API_BASE_URL, API_KEY, and MODEL_NAME."
+            "Missing API credentials. Set API_BASE_URL."
+        )
+        return 1
+    if not API_KEY:
+        _stderr_log(
+            "Missing API credentials. Set HF_TOKEN or API_KEY."
+        )
+        return 1
+    if not MODEL_NAME:
+        _stderr_log(
+            "Missing model configuration. Set MODEL_NAME to specify which model to use for inference."
         )
         return 1
 

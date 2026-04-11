@@ -53,9 +53,18 @@ class IncidentEnv(
         Returns:
             Dictionary representation suitable for JSON encoding
         """
-        return {
+        payload: Dict[str, object] = {
             "command": action.command,
         }
+        if action.action_type:
+            payload["action_type"] = action.action_type
+        if action.service:
+            payload["service"] = action.service
+        if action.config_key:
+            payload["config_key"] = action.config_key
+        if action.config_value:
+            payload["config_value"] = action.config_value
+        return payload
 
     def _parse_result(self, payload: Dict) -> StepResult[IncidentObservation]:
         """
@@ -69,6 +78,12 @@ class IncidentEnv(
         """
         obs_data = payload.get("observation", {})
         observation = IncidentObservation(
+            task_id=obs_data.get("task_id", ""),
+            step_count=obs_data.get("step_count", 0),
+            max_steps=obs_data.get("max_steps", 0),
+            task_spec=obs_data.get("task_spec", {}),
+            service_status=obs_data.get("service_status", {}),
+            last_command=obs_data.get("last_command"),
             stdout=obs_data.get("stdout", ""),
             stderr=obs_data.get("stderr", ""),
             exit_code=obs_data.get("exit_code", 0),
@@ -104,6 +119,10 @@ class IncidentEnv(
             status=payload.get("status", ""),
             completed=payload.get("completed", False),
             score=payload.get("score", 0.0),
+            task_spec=payload.get("task_spec", {}),
+            service_status=payload.get("service_status", {}),
+            scenario=payload.get("scenario", {}),
+            config_state=payload.get("config_state", {}),
             milestones=payload.get("milestones", {}),
             penalties=payload.get("penalties", {}),
             last_command=payload.get("last_command"),
