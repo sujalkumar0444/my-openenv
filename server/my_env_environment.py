@@ -8,9 +8,12 @@
 Oncall Incident Response Environment Implementation.
 """
 
-from uuid import uuid4
-from typing import Any, Dict, Optional, Tuple
+import json
+import os
 import random
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import EnvironmentMetadata
@@ -21,7 +24,43 @@ except ImportError:
     from models import IncidentAction, IncidentObservation, IncidentState
 
 
-TASK_SPECS: Dict[str, Dict[str, Any]] = {
+ENV_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_task_specs(default_specs: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    specs = {key: dict(value) for key, value in default_specs.items()}
+    tasks_path = Path(os.getenv("INCIDENT_TASKS_PATH", str(ENV_ROOT / "tasks.json")))
+    if not tasks_path.exists():
+        return specs
+
+    try:
+        data = json.loads(tasks_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return specs
+
+    tasks = data.get("tasks", {})
+    if not isinstance(tasks, dict):
+        return specs
+
+    for task_id, task_spec in tasks.items():
+        if not isinstance(task_spec, dict):
+            continue
+        specs[task_id] = _deep_merge(specs.get(task_id, {}), task_spec)
+
+    return specs
+
+
+DEFAULT_TASK_SPECS: Dict[str, Dict[str, Any]] = {
     "restart_pod": {
         "title": "Recover crash-looping database",
         "difficulty": "easy",
@@ -86,9 +125,12 @@ TASK_SPECS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+TASK_SPECS: Dict[str, Dict[str, Any]] = _load_task_specs(DEFAULT_TASK_SPECS)
+
 HELP_TEXT = (
-    "Commands: status, logs <service>, restart <service>, edit_config <service> <key=value>, "
-    "drain <service>, rollback <service>, help, noop"
+    "Commands: status, alerts, ack <alert_id>, impact, metrics <service>, runbook <service>, "
+    "logs <service>, restart <service>, edit_config <service> <key=value>, drain <service>, "
+    "rollback <service>, history, help, noop"
 )
 
 
@@ -146,20 +188,29 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
     def _reset_state(self) -> None:
         self._state = {
             "checked_status": False,
+            "checked_alerts": False,
             "checked_logs": False,
+            "checked_metrics": False,
+            "read_runbook": False,
             "restarted": False,
             "config_fixed": False,
             "drained": False,
             "rolled_back": False,
+            "acked_alerts": [],
             "invalid_actions": 0,
             "repeat_actions": 0,
             "unsafe_action": False,
             "last_command": None,
             "last_error": "",
             "history": [],
+            "timeline": [],
             "service_status": {},
+            "service_versions": {},
             "config_state": {},
             "scenario": {},
+            "alerts": [],
+            "incident": {},
+            "metrics": {},
         }
 
     def reset(
@@ -200,11 +251,17 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
         }
         self._state["scenario"] = dict(self._scenario)
         self._state["config_state"] = self._initial_config_state(spec)
+        self._state["service_versions"] = self._initial_versions(spec)
+        self._state["alerts"] = self._build_alerts(spec)
+        self._state["incident"] = self._build_incident(spec, selected_variant)
         self._state["service_status"] = self._service_status()
+        self._state["metrics"] = self._metrics_snapshot()
 
         banner = (
             "Oncall Incident Console\n"
             f"Task: {task_id} ({spec['difficulty']})\n"
+            f"Severity: {spec.get('severity', 'sev3')}\n"
+            f"Impact: {spec.get('impact', 'n/a')}\n"
             f"Objective: {spec['objective']}\n"
             f"Services: {', '.join(spec['services'])}\n"
             f"Variant: {selected_variant}\n"
@@ -220,6 +277,12 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             max_steps=self.max_steps,
             task_spec=self._task_spec,
             service_status=self._state.get("service_status", {}),
+            service_versions=self._state.get("service_versions", {}),
+            incident=self._state.get("incident", {}),
+            alerts=self._state.get("alerts", []),
+            metrics=self._state.get("metrics", {}),
+            timeline=self._state.get("timeline", []),
+            config_state=self._state.get("config_state", {}),
             last_command=self._state.get("last_command"),
             stdout=banner,
             stderr="",
@@ -236,16 +299,21 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             "task_id": task_id,
             "title": spec.get("title", ""),
             "difficulty": spec.get("difficulty", ""),
+            "severity": spec.get("severity", ""),
+            "impact": spec.get("impact", ""),
             "objective": spec.get("objective", ""),
             "services": list(spec.get("services", [])),
             "primary_service": spec.get("primary_service", ""),
             "max_steps": spec.get("max_steps", 0),
             "variant": spec.get("variant", "base"),
+            "runbook": spec.get("runbook", {}),
+            "alerts": spec.get("alerts", []),
         }
         if task_id == "fix_config":
             task_spec["config_key"] = spec.get("config_key")
         if task_id == "rollback_deploy":
             task_spec["requires_drain"] = True
+            task_spec["rollback_version"] = spec.get("rollback_version")
         return task_spec
 
     def _initial_config_state(self, spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -254,6 +322,52 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             if key:
                 return {key: "invalid"}
         return {}
+
+    def _initial_versions(self, spec: Dict[str, Any]) -> Dict[str, str]:
+        versions = spec.get("versions") or {}
+        if isinstance(versions, dict):
+            return {k: str(v) for k, v in versions.items()}
+        return {}
+
+    def _build_alerts(self, spec: Dict[str, Any]) -> list[Dict[str, Any]]:
+        alerts = spec.get("alerts") or []
+        if not isinstance(alerts, list):
+            return []
+        normalized = []
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
+            entry = dict(alert)
+            entry.setdefault("acknowledged", False)
+            entry.setdefault("status", "firing")
+            normalized.append(entry)
+        return normalized
+
+    def _build_incident(self, spec: Dict[str, Any], variant: str) -> Dict[str, Any]:
+        return {
+            "incident_id": f"INC-{random.randint(1000, 9999)}",
+            "severity": spec.get("severity", "sev3"),
+            "impact": spec.get("impact", ""),
+            "primary_service": spec.get("primary_service", ""),
+            "variant": variant,
+        }
+
+    def _metrics_snapshot(self) -> Dict[str, Any]:
+        spec = self._active_spec or TASK_SPECS[self._task_id]
+        base_metrics = spec.get("metrics") or {}
+        healthy_metrics = spec.get("healthy_metrics") or {}
+        if not isinstance(base_metrics, dict):
+            base_metrics = {}
+        if not isinstance(healthy_metrics, dict):
+            healthy_metrics = {}
+
+        if self._task_id == "restart_pod" and self._state["restarted"]:
+            return healthy_metrics
+        if self._task_id == "fix_config" and self._state["config_fixed"] and self._state["restarted"]:
+            return healthy_metrics
+        if self._task_id == "rollback_deploy" and self._state["rolled_back"]:
+            return healthy_metrics
+        return base_metrics
 
     def _service_status(self) -> Dict[str, str]:
         if not self._task_id:
@@ -319,6 +433,9 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             self._state["repeat_actions"] += 1
         self._state["last_command"] = normalized.lower() if normalized else None
         self._state["history"].append(command)
+        self._state["timeline"].append(
+            {"step": self.step_count, "command": normalized or "", "event": "command"}
+        )
         return normalized
 
     def _status_output(self) -> str:
@@ -340,6 +457,56 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             self._state["checked_logs"] = True
             return spec["log_message"], "", 0
         return f"{target}: no recent errors in last 15m.", "", 0
+
+    def _alerts_output(self) -> str:
+        alerts = self._state.get("alerts", [])
+        if not alerts:
+            return "No active alerts."
+        lines = []
+        for alert in alerts:
+            alert_id = alert.get("id", "unknown")
+            severity = alert.get("severity", "sev3")
+            summary = alert.get("summary", "")
+            status = alert.get("status", "firing")
+            ack = "ack" if alert.get("acknowledged") else "unacked"
+            lines.append(f"{alert_id} [{severity}] ({status}, {ack}) - {summary}")
+        return "\n".join(lines)
+
+    def _ack_alert(self, alert_id: str) -> Tuple[str, str, int]:
+        alerts = self._state.get("alerts", [])
+        for alert in alerts:
+            if alert.get("id") == alert_id:
+                alert["acknowledged"] = True
+                self._state["acked_alerts"].append(alert_id)
+                return f"Alert {alert_id} acknowledged.", "", 0
+        return "", f"Alert '{alert_id}' not found.", 1
+
+    def _impact_output(self) -> str:
+        spec = self._active_spec or TASK_SPECS[self._task_id]
+        return spec.get("impact", "No impact summary available.")
+
+    def _metrics_output(self, target: str) -> Tuple[str, str, int]:
+        metrics = self._metrics_snapshot()
+        if target not in metrics:
+            return "", f"Service '{target}' not found.", 1
+        payload = metrics.get(target, {})
+        if not isinstance(payload, dict):
+            return "", "Metrics unavailable.", 1
+        lines = [f"{key}: {value}" for key, value in payload.items()]
+        self._state["checked_metrics"] = True
+        return "\n".join(lines), "", 0
+
+    def _runbook_output(self, target: str) -> Tuple[str, str, int]:
+        spec = self._active_spec or TASK_SPECS[self._task_id]
+        runbook = spec.get("runbook", {})
+        if not isinstance(runbook, dict) or target not in runbook:
+            return "", f"Runbook for '{target}' not found.", 1
+        steps = runbook.get(target, [])
+        if not isinstance(steps, list) or not steps:
+            return "", "Runbook is empty.", 1
+        self._state["read_runbook"] = True
+        lines = [f"- {step}" for step in steps]
+        return "\n".join(lines), "", 0
 
     def _execute(self, command: str) -> Tuple[str, str, int]:
         normalized = self._record_command(command)
@@ -363,6 +530,28 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             self._state["checked_status"] = True
             return self._status_output(), "", 0
 
+        if cmd == "alerts":
+            self._state["checked_alerts"] = True
+            return self._alerts_output(), "", 0
+
+        if cmd == "ack":
+            if not args:
+                return "", "Missing alert id", 1
+            return self._ack_alert(args[0])
+
+        if cmd == "impact":
+            return self._impact_output(), "", 0
+
+        if cmd == "metrics":
+            if not args:
+                return "", "Missing service name", 1
+            return self._metrics_output(args[0].lower())
+
+        if cmd == "runbook":
+            if not args:
+                return "", "Missing service name", 1
+            return self._runbook_output(args[0].lower())
+
         if cmd == "logs":
             if not args:
                 return "", "Missing service name", 1
@@ -378,11 +567,17 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
                 return "", f"Service '{target}' not found.", 1
             if self._task_id == "restart_pod" and target == spec["primary_service"]:
                 self._state["restarted"] = True
+                self._state["timeline"].append(
+                    {"step": self.step_count, "event": "restart", "service": target}
+                )
                 return f"Restarting {target}... Done.", "", 0
             if self._task_id == "fix_config" and target == spec["primary_service"]:
                 if not self._state["config_fixed"]:
                     return "", "Config is still invalid. Update config before restart.", 1
                 self._state["restarted"] = True
+                self._state["timeline"].append(
+                    {"step": self.step_count, "event": "restart", "service": target}
+                )
                 return f"Restarting {target} with updated config... Done.", "", 0
             return "", "Restart is not required for this task.", 1
 
@@ -407,6 +602,9 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
                 return "", "Config value rejected by validation.", 1
             self._state["config_fixed"] = True
             self._state["config_state"] = {spec["config_key"]: "valid"}
+            self._state["timeline"].append(
+                {"step": self.step_count, "event": "config_updated", "service": target}
+            )
             return "Config updated. Restart required.", "", 0
 
         if cmd == "drain":
@@ -419,6 +617,9 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             if target != spec["primary_service"]:
                 return "", f"Service '{target}' cannot be drained here.", 1
             self._state["drained"] = True
+            self._state["timeline"].append(
+                {"step": self.step_count, "event": "drain", "service": target}
+            )
             return f"Traffic drained from {target}.", "", 0
 
         if cmd == "rollback":
@@ -434,7 +635,18 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
                 self._state["unsafe_action"] = True
                 return "", "Unsafe rollback: traffic still active. Incident escalated.", 1
             self._state["rolled_back"] = True
+            rollback_version = spec.get("rollback_version", "2.3.0")
+            self._state["service_versions"][target] = rollback_version
+            self._state["timeline"].append(
+                {"step": self.step_count, "event": "rollback", "service": target, "version": rollback_version}
+            )
             return f"Rolled back {target} to version 2.3.0.", "", 0
+
+        if cmd == "history":
+            history = self._state.get("history", [])
+            if not history:
+                return "No commands executed.", "", 0
+            return "\n".join(history), "", 0
 
         return "", f"Command '{cmd}' not found", 127
 
@@ -442,19 +654,25 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
         if self._task_id == "restart_pod":
             return {
                 "checked_status": self._state["checked_status"],
+                "checked_alerts": self._state["checked_alerts"],
                 "checked_logs": self._state["checked_logs"],
+                "checked_metrics": self._state["checked_metrics"],
                 "restarted": self._state["restarted"],
             }
         if self._task_id == "fix_config":
             return {
                 "checked_status": self._state["checked_status"],
+                "checked_alerts": self._state["checked_alerts"],
                 "checked_logs": self._state["checked_logs"],
+                "checked_metrics": self._state["checked_metrics"],
                 "config_fixed": self._state["config_fixed"],
                 "restarted": self._state["restarted"],
             }
         if self._task_id == "rollback_deploy":
             return {
                 "checked_logs": self._state["checked_logs"],
+                "checked_alerts": self._state["checked_alerts"],
+                "checked_metrics": self._state["checked_metrics"],
                 "drained": self._state["drained"],
                 "rolled_back": self._state["rolled_back"],
             }
@@ -465,8 +683,12 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             score = 0.0
             if milestones.get("checked_status"):
                 score += 0.2
+            if milestones.get("checked_alerts"):
+                score += 0.1
             if milestones.get("checked_logs"):
                 score += 0.2
+            if milestones.get("checked_metrics"):
+                score += 0.1
             if milestones.get("restarted"):
                 score += 0.6
             return score, milestones.get("restarted", False), TASK_SPECS[self._task_id][
@@ -477,8 +699,12 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             score = 0.0
             if milestones.get("checked_status"):
                 score += 0.15
+            if milestones.get("checked_alerts"):
+                score += 0.1
             if milestones.get("checked_logs"):
                 score += 0.25
+            if milestones.get("checked_metrics"):
+                score += 0.1
             if milestones.get("config_fixed"):
                 score += 0.35
             if milestones.get("restarted"):
@@ -492,6 +718,10 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             score = 0.0
             if milestones.get("checked_logs"):
                 score += 0.15
+            if milestones.get("checked_alerts"):
+                score += 0.1
+            if milestones.get("checked_metrics"):
+                score += 0.1
             if milestones.get("drained"):
                 score += 0.35
             if milestones.get("rolled_back"):
@@ -560,6 +790,7 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             self._state["last_error"] = ""
 
         self._state["service_status"] = self._service_status()
+        self._state["metrics"] = self._metrics_snapshot()
 
         score, reason, done, milestones, penalties = self._grade()
 
@@ -569,6 +800,12 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             max_steps=self.max_steps,
             task_spec=self._task_spec,
             service_status=self._state.get("service_status", {}),
+            service_versions=self._state.get("service_versions", {}),
+            incident=self._state.get("incident", {}),
+            alerts=self._state.get("alerts", []),
+            metrics=self._state.get("metrics", {}),
+            timeline=self._state.get("timeline", []),
+            config_state=self._state.get("config_state", {}),
             last_command=self._state.get("last_command"),
             stdout=out,
             stderr=err,
@@ -597,19 +834,37 @@ class IncidentResponseEnvironment(Environment[IncidentAction, IncidentObservatio
             service_status=self._state.get("service_status", {}),
             scenario=self._state.get("scenario", {}),
             config_state=self._state.get("config_state", {}),
+            service_versions=self._state.get("service_versions", {}),
+            incident=self._state.get("incident", {}),
+            alerts=self._state.get("alerts", []),
+            metrics=self._state.get("metrics", {}),
+            timeline=self._state.get("timeline", []),
             milestones=milestones,
             penalties=penalties,
             last_command=self._state.get("last_command"),
         )
 
     def get_metadata(self) -> EnvironmentMetadata:
+        readme_content = _load_readme()
         return EnvironmentMetadata(
             name="Oncall Incident Response",
             description=(
                 "A real-world incident response environment for on-call reliability tasks."
             ),
             version="1.1.0",
+            author=os.getenv("ENV_AUTHOR"),
+            documentation_url=os.getenv("ENV_DOC_URL"),
+            readme_content=readme_content,
         )
 
     def close(self) -> None:
+        return None
+
+
+def _load_readme() -> Optional[str]:
+    env_root = Path(__file__).resolve().parents[1]
+    readme_path = env_root / "README.md"
+    try:
+        return readme_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None

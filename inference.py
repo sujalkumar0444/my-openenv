@@ -1,11 +1,12 @@
 """
 Inference Script Example
 ===================================
-MANDATORY
-- Before submitting, ensure the following variables are defined in your environment configuration:
+RECOMMENDED
+- For LLM-backed inference, set the following variables in your environment configuration:
     API_BASE_URL   The API endpoint for the LLM.
     MODEL_NAME     The model identifier to use for inference.
     HF_TOKEN       Your Hugging Face / API key.
+- If these are not set, the script falls back to a deterministic plan.
 """
 
 import os
@@ -203,23 +204,21 @@ def run_task(client: Optional[OpenAI], task_id: str) -> Tuple[float, str]:
 
 
 def main() -> int:
+    client: Optional[OpenAI] = None
+    missing = []
     if not API_BASE_URL:
-        _stderr_log(
-            "Missing API credentials. Set API_BASE_URL."
-        )
-        return 1
+        missing.append("API_BASE_URL")
     if not API_KEY:
-        _stderr_log(
-            "Missing API credentials. Set HF_TOKEN or API_KEY."
-        )
-        return 1
+        missing.append("HF_TOKEN/API_KEY")
     if not MODEL_NAME:
-        _stderr_log(
-            "Missing model configuration. Set MODEL_NAME to specify which model to use for inference."
-        )
-        return 1
+        missing.append("MODEL_NAME")
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    if missing:
+        _stderr_log(
+            f"Missing LLM config ({', '.join(missing)}); using deterministic plan."
+        )
+    else:
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     scores: Dict[str, float] = {}
     for task in TASK_PLANS.keys():

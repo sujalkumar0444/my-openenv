@@ -26,13 +26,19 @@ Production incidents require careful investigation, safe remediation, and discip
 - `max_steps` (int): Maximum steps for the current task.
 - `task_spec` (dict): Task metadata (objective, difficulty, services, variant).
 - `service_status` (dict): Latest status per service.
+- `service_versions` (dict): Version map per service.
+- `incident` (dict): Incident metadata (id, severity, impact, variant).
+- `alerts` (list): Active alerts and acknowledgement state.
+- `metrics` (dict): Latest metrics snapshot.
+- `timeline` (list): Timeline of actions/events.
+- `config_state` (dict): Current config status for editable tasks.
 - `last_command` (string | null): Most recent command.
 - `milestones` (dict): Completed milestones for the active task.
 - `penalties` (dict): Penalty counters for invalid or repeated actions.
 
 ## Action Space
 - `command` (string): The single CLI command to run.
-  - Supported commands: `status`, `logs <service>`, `restart <service>`, `edit_config <service> <key=value>`, `drain <service>`, `rollback <service>`, `help`, `noop`
+   - Supported commands: `status`, `alerts`, `ack <alert_id>`, `impact`, `metrics <service>`, `runbook <service>`, `logs <service>`, `restart <service>`, `edit_config <service> <key=value>`, `drain <service>`, `rollback <service>`, `history`, `help`, `noop`
 
 ### Structured Actions (Optional)
 You can send structured fields instead of a raw command string:
@@ -86,6 +92,40 @@ Fields:
 - `max_steps`: Override maximum steps for the episode.
 - `randomize`: If true, selects a random variant when `variant` is not provided.
 
+A sample config file is provided at `scenario_config.json`. You can POST it directly:
+```bash
+curl -X POST http://127.0.0.1:8000/reset \
+   -H "Content-Type: application/json" \
+   -d @scenario_config.json
+```
+
+## Quick Start
+
+### Run the server (UV)
+```bash
+uv sync
+uv run server
+```
+
+### Run a quick episode
+```bash
+python - <<'PY'
+from my_env import IncidentAction, IncidentEnv
+
+with IncidentEnv(base_url="http://127.0.0.1:8000") as env:
+      env.reset(task_id="restart_pod")
+   env.step(IncidentAction(command="alerts"))
+   env.step(IncidentAction(command="metrics payments-db"))
+   env.step(IncidentAction(command="runbook payments-db"))
+      result = env.step(IncidentAction(command="status"))
+      print(result.observation.stdout)
+PY
+```
+
+## Task Catalog
+The environment loads tasks from `tasks.json` if present (override with `INCIDENT_TASKS_PATH`).
+This enables richer incidents with alerts, metrics, versions, and runbooks.
+
 ## Setup & Usage
 
 ### Running Locally (UV)
@@ -99,6 +139,12 @@ uv run server
 docker build -t oncall-incident-env -f server/Dockerfile .
 docker run -p 8000:8000 oncall-incident-env
 ```
+
+## Environment Variables
+- `MAX_CONCURRENT_ENVS`: Maximum concurrent WebSocket sessions (default: 4).
+- `ENV_AUTHOR`: Optional author name for `/metadata`.
+- `ENV_DOC_URL`: Optional documentation URL for `/metadata`.
+- `INCIDENT_TASKS_PATH`: Optional path to a custom task catalog JSON.
 
 ## OpenEnv Endpoints
 - `POST /reset` with `{ "task_id": "..." }`
@@ -118,7 +164,7 @@ openenv validate --url http://127.0.0.1:8000
 ## Inference Baseline
 The repository includes a baseline `inference.py` script that uses the OpenAI client.
 
-Required environment variables:
+Recommended environment variables (LLM-backed inference):
 - `API_BASE_URL` (example: `https://router.huggingface.co/v1`)
 - `MODEL_NAME`
 - `HF_TOKEN` (or `OPENAI_API_KEY`)
@@ -127,6 +173,11 @@ Required environment variables:
 export API_BASE_URL="https://router.huggingface.co/v1"
 export MODEL_NAME="your-model"
 export HF_TOKEN="your-api-key"
+python inference.py
+```
+
+If these variables are not set, the script falls back to a deterministic plan:
+```bash
 python inference.py
 ```
 

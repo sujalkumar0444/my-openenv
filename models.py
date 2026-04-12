@@ -47,6 +47,30 @@ class IncidentObservation(Observation):
         default_factory=dict,
         description="Latest status for each service",
     )
+    service_versions: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Service version map for the active task",
+    )
+    incident: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Incident metadata (id, severity, impact, variant)",
+    )
+    alerts: list[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Active alert list with acknowledgement status",
+    )
+    metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Latest metrics snapshot for services",
+    )
+    timeline: list[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Incident timeline events",
+    )
+    config_state: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Config state for tasks that require edits",
+    )
     last_command: Optional[str] = Field(
         default=None, description="Most recent command executed"
     )
@@ -88,6 +112,26 @@ class IncidentState(State):
     config_state: Dict[str, Any] = Field(
         default_factory=dict,
         description="Config state for tasks that require edits",
+    )
+    service_versions: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Service version map for the active task",
+    )
+    incident: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Incident metadata (id, severity, impact, variant)",
+    )
+    alerts: list[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Active alert list with acknowledgement status",
+    )
+    metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Latest metrics snapshot for services",
+    )
+    timeline: list[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Incident timeline events",
     )
     milestones: Dict[str, bool] = Field(
         default_factory=dict,

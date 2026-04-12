@@ -1,0 +1,243 @@
+{
+  "tasks": {
+    "restart_pod": {
+      "title": "Recover crash-looping database",
+      "difficulty": "easy",
+      "severity": "sev3",
+      "impact": "Payments API intermittently failing; checkout latency elevated.",
+      "objective": "Inspect alerts, status, and logs, then restart payments-db to restore service.",
+      "max_steps": 10,
+      "services": ["payments-db", "payments-api"],
+      "primary_service": "payments-db",
+      "log_message": "FATAL: database process exited unexpectedly. CrashLoopBackOff triggered.",
+      "success_reason": "Payments database restarted and service stabilized.",
+      "alerts": [
+        {
+          "id": "A-101",
+          "service": "payments-db",
+          "severity": "sev3",
+          "summary": "CrashLoopBackOff detected on payments-db"
+        }
+      ],
+      "metrics": {
+        "payments-db": {
+          "cpu_pct": 94,
+          "restart_count": 12,
+          "p99_latency_ms": 900
+        },
+        "payments-api": {
+          "error_pct": 12.0,
+          "p99_latency_ms": 780
+        }
+      },
+      "healthy_metrics": {
+        "payments-db": {
+          "cpu_pct": 28,
+          "restart_count": 0,
+          "p99_latency_ms": 35
+        },
+        "payments-api": {
+          "error_pct": 0.4,
+          "p99_latency_ms": 120
+        }
+      },
+      "runbook": {
+        "payments-db": [
+          "Check status for crash loops",
+          "Inspect recent logs for crash reason",
+          "Restart the service",
+          "Verify health and latency"
+        ]
+      },
+      "versions": {
+        "payments-db": "14.2",
+        "payments-api": "2.1.4"
+      },
+      "variants": [
+        {
+          "id": "disk_pressure",
+          "log_message": "ERROR: fsync latency high. Disk pressure causing db stalls.",
+          "metrics": {
+            "payments-db": {
+              "cpu_pct": 88,
+              "restart_count": 6,
+              "p99_latency_ms": 1400
+            }
+          }
+        },
+        {
+          "id": "network_flap",
+          "log_message": "WARN: heartbeat timeout from payments-db. Connection resets observed.",
+          "metrics": {
+            "payments-db": {
+              "cpu_pct": 72,
+              "restart_count": 9,
+              "p99_latency_ms": 1100
+            }
+          }
+        }
+      ]
+    },
+    "fix_config": {
+      "title": "Fix DB host misconfiguration",
+      "difficulty": "medium",
+      "severity": "sev2",
+      "impact": "Checkout errors at 25% due to DB host misconfiguration.",
+      "objective": "Find the bad DB host in checkout-api logs, fix DATABASE_HOST, and restart.",
+      "max_steps": 12,
+      "services": ["checkout-api", "checkout-worker"],
+      "primary_service": "checkout-api",
+      "log_message": "ERROR: connection failed (host=db-prod.local invalid).",
+      "config_key": "DATABASE_HOST",
+      "config_value": "db-prod.internal",
+      "success_reason": "Checkout API config fixed and service restarted with healthy DB connection.",
+      "alerts": [
+        {
+          "id": "A-201",
+          "service": "checkout-api",
+          "severity": "sev2",
+          "summary": "Checkout API DB connection failures"
+        }
+      ],
+      "metrics": {
+        "checkout-api": {
+          "error_pct": 28.0,
+          "p99_latency_ms": 1600
+        },
+        "checkout-worker": {
+          "error_pct": 4.0,
+          "queue_lag_s": 75
+        }
+      },
+      "healthy_metrics": {
+        "checkout-api": {
+          "error_pct": 0.6,
+          "p99_latency_ms": 180
+        },
+        "checkout-worker": {
+          "error_pct": 0.8,
+          "queue_lag_s": 6
+        }
+      },
+      "runbook": {
+        "checkout-api": [
+          "Check alerts and status",
+          "Inspect logs for DB host failures",
+          "Update DATABASE_HOST to prod",
+          "Restart and confirm healthy metrics"
+        ]
+      },
+      "versions": {
+        "checkout-api": "3.4.2",
+        "checkout-worker": "3.1.0"
+      },
+      "variants": [
+        {
+          "id": "legacy_host",
+          "log_message": "ERROR: connection failed (host=db-legacy.local invalid).",
+          "metrics": {
+            "checkout-api": {
+              "error_pct": 34.0,
+              "p99_latency_ms": 2100
+            }
+          }
+        },
+        {
+          "id": "staging_host",
+          "log_message": "ERROR: connection failed (host=db-staging.local invalid).",
+          "metrics": {
+            "checkout-api": {
+              "error_pct": 22.0,
+              "p99_latency_ms": 1300
+            }
+          }
+        }
+      ]
+    },
+    "rollback_deploy": {
+      "title": "Rollback a leaky deployment safely",
+      "difficulty": "hard",
+      "severity": "sev1",
+      "impact": "Search latency spiking with memory leak on search-api.",
+      "objective": "Confirm memory leak in logs, drain traffic, then rollback search-api.",
+      "max_steps": 14,
+      "services": ["search-api", "search-indexer"],
+      "primary_service": "search-api",
+      "log_message": "OutOfMemoryError: heap usage exceeded after build 2.3.1.",
+      "success_reason": "Traffic drained and search API rolled back to stable build.",
+      "alerts": [
+        {
+          "id": "A-301",
+          "service": "search-api",
+          "severity": "sev1",
+          "summary": "Search API memory leak detected"
+        },
+        {
+          "id": "A-302",
+          "service": "search-api",
+          "severity": "sev1",
+          "summary": "Search p99 latency above SLO"
+        }
+      ],
+      "metrics": {
+        "search-api": {
+          "memory_mb": 9800,
+          "p99_latency_ms": 1850,
+          "error_pct": 9.0
+        },
+        "search-indexer": {
+          "error_pct": 0.8,
+          "queue_lag_s": 12
+        }
+      },
+      "healthy_metrics": {
+        "search-api": {
+          "memory_mb": 1200,
+          "p99_latency_ms": 210,
+          "error_pct": 0.5
+        },
+        "search-indexer": {
+          "error_pct": 0.3,
+          "queue_lag_s": 4
+        }
+      },
+      "runbook": {
+        "search-api": [
+          "Check alerts and logs for memory leak",
+          "Drain traffic before rollback",
+          "Rollback to the last stable build",
+          "Verify latency and memory recovery"
+        ]
+      },
+      "versions": {
+        "search-api": "2.3.1",
+        "search-indexer": "1.8.0"
+      },
+      "rollback_version": "2.3.0",
+      "variants": [
+        {
+          "id": "gc_thrashing",
+          "log_message": "OutOfMemoryError: heap usage exceeded after build 2.3.1. GC thrashing detected.",
+          "metrics": {
+            "search-api": {
+              "memory_mb": 10400,
+              "p99_latency_ms": 2200,
+              "error_pct": 11.0
+            }
+          }
+        },
+        {
+          "id": "cache_leak",
+          "log_message": "OutOfMemoryError: heap usage exceeded after build 2.3.1. Cache entries unbounded.",
+          "metrics": {
+            "search-api": {
+              "memory_mb": 11200,
+              "p99_latency_ms": 2600,
+              "error_pct": 13.0
+            }
+          }
+        }
+      ]
+    }
+  }
+}

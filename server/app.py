@@ -28,6 +28,8 @@ Usage:
     python -m server.app
 """
 
+import os
+
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:  # pragma: no cover
@@ -43,13 +45,25 @@ except ImportError:
     from server.my_env_environment import IncidentResponseEnvironment
 
 
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+MAX_CONCURRENT_ENVS = _int_env("MAX_CONCURRENT_ENVS", 4)
+
 # Create the app with web interface and README integration
 app = create_app(
     IncidentResponseEnvironment,
     IncidentAction,
     IncidentObservation,
     env_name="oncall_incident_response",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    max_concurrent_envs=MAX_CONCURRENT_ENVS,
 )
 
 

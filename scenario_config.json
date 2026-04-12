@@ -1,0 +1,9 @@
+{
+  "task_id": "fix_config",
+  "scenario_config": {
+    "variant": "legacy_host",
+    "seed": 42,
+    "max_steps": 12,
+    "randomize": false
+  }
+}
